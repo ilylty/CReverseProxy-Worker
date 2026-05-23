@@ -31,6 +31,7 @@
 - `enforceTargetPolicy()` intentionally blocks localhost, common private/internal suffixes, private IPv4 ranges, and local/ULA/link-local IPv6 literals. Do not relax this casually; it is the repo's SSRF protection.
 - Only ports `80` and `443` are allowed for upstream targets.
 - Response headers are intentionally stripped in `rewriteResponseHeaders()`, including CSP, frame/embed policies, and `alt-svc`, and `Set-Cookie` is conservatively rewritten. `content-length` is also dropped for rewritten HTML/CSS responses. Changes here can affect rendering and login behavior.
+- `rewriteForwardHeaders()` must preserve real upstream context for proxied subresources. If a browser sends `Referer: <proxy-origin>/https/<site>/...`, unwrap it back to the real target URL before forwarding. Cross-origin CDN assets may legitimately need a page referer from a different host, such as a video page host referring to an HLS/CDN segment host.
 
 ## Known Special Cases
 - `buildFallbackAssetResponse()` returns synthetic empty assets for specific Apple CDN failures:
@@ -44,3 +45,10 @@
   home page redirect, relative asset loading, form submission, redirects, SSE, and WebSocket proxying.
 - If you touch URL parsing or rewriting, test both canonical proxied paths like `/https/github.com/` and same-origin relative navigations recovered from a proxied page.
 - For lightweight structural refactors, `npx wrangler deploy --dry-run` is the fastest bundle validation step available in this repo.
+
+## Debugging Notes
+- There are local `DEBUG_FETCH` constants in `src/index.js` and `src/home.js`. Temporarily set them to `true` to print Worker entry requests, outgoing upstream `fetch()` inputs, and upstream response status/headers. Set them back to `false` before leaving normal production traffic enabled.
+- Collect deployed Worker logs with `npx wrangler tail --format pretty`.
+- For CDN/HLS failures, compare `[debug:fetch:worker]`, `[debug:fetch:upstream]`, and `[debug:fetch-response:upstream]`. Missing or proxy-shaped `referer` on the upstream request can produce CDN `404`/`403` even when the signed URL is otherwise valid.
+- A successful HLS segment proxy should show the upstream request carrying a real page `referer` such as `https://example.com/view_video...`, followed by `status: 200` or `206` and a media content type such as `video/MP2T`.
+- If the real referer is present but the CDN still rejects the request, suspect signed URL expiry, IP/region binding, required `Range` headers, or other anti-hotlink request headers before changing URL rewriting logic.

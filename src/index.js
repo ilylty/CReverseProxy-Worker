@@ -21,10 +21,13 @@ import {
 
 const RESERVED_PATHS = new Set(["/favicon.ico", "/robots.txt"]);
 const MAX_UPSTREAM_REDIRECTS = 3;
+const DEBUG_FETCH = false;
+const DEBUG_FETCH_HOST_FILTER = ".googlevideo.com";
 
 export default {
   async fetch(request) {
     try {
+      debugLogFetchInput("worker", request);
       return await handleRequest(request);
     } catch (error) {
       return new Response(`Proxy error: ${error.message}`, { status: 500 });
@@ -36,7 +39,7 @@ async function handleRequest(request) {
   const requestUrl = new URL(request.url);
 
   if (RESERVED_PATHS.has(requestUrl.pathname)) {
-    return new Response("", { status: 204 });
+    return new Response(null, { status: 204 });
   }
 
   if (requestUrl.pathname === "/") {
@@ -151,9 +154,12 @@ async function fetchUpstreamResponse(request, targetUrl) {
     const upstreamRequest = buildUpstreamRequest(request, currentTargetUrl, {
       method: currentMethod,
     });
-    const upstreamResponse = await fetch(upstreamRequest, {
+    const fetchInit = {
       redirect: "manual",
-    });
+    };
+    debugLogFetchInput("upstream", upstreamRequest, fetchInit);
+    const upstreamResponse = await fetch(upstreamRequest, fetchInit);
+    debugLogFetchResponse("upstream", upstreamResponse, currentTargetUrl);
 
     if (!shouldAutoFollow || !isRedirectResponse(upstreamResponse.status)) {
       return { upstreamResponse, finalTargetUrl: currentTargetUrl };
@@ -298,9 +304,12 @@ async function buildHeadAttachmentProbeResponse(request, requestUrl, targetUrl, 
       range: "bytes=0-0",
     },
   });
-  const probeResponse = await fetch(probeRequest, {
+  const fetchInit = {
     redirect: "manual",
-  });
+  };
+  debugLogFetchInput("head-probe", probeRequest, fetchInit);
+  const probeResponse = await fetch(probeRequest, fetchInit);
+  debugLogFetchResponse("head-probe", probeResponse, targetUrl);
 
   if (probeResponse.body) {
     await probeResponse.body.cancel();
@@ -383,9 +392,11 @@ function rewriteForwardHeaders(headers, targetUrl, originalTargetUrl, requestCon
 
   const originHeader = headers.get("origin");
   if (originHeader) {
-    const originUrl = safeResolveUrl(originHeader, sourceTargetUrl);
-    if (shouldForwardContextUrl(originUrl, sourceTargetUrl)) {
-      headers.set("origin", retargetProxyUrl(originUrl, sourceTargetUrl, targetUrl).origin);
+    const originContext = resolveForwardContextUrl(originHeader, sourceTargetUrl);
+    if (originContext?.isProxied) {
+      headers.set("origin", originContext.url.origin);
+    } else if (shouldForwardContextUrl(originContext?.url, sourceTargetUrl)) {
+      headers.set("origin", retargetProxyUrl(originContext.url, sourceTargetUrl, targetUrl).origin);
     } else {
       headers.delete("origin");
     }
@@ -393,9 +404,11 @@ function rewriteForwardHeaders(headers, targetUrl, originalTargetUrl, requestCon
 
   const refererHeader = headers.get("referer");
   if (refererHeader) {
-    const refererUrl = safeResolveUrl(refererHeader, sourceTargetUrl);
-    if (shouldForwardContextUrl(refererUrl, sourceTargetUrl)) {
-      headers.set("referer", retargetProxyUrl(refererUrl, sourceTargetUrl, targetUrl).toString());
+    const refererContext = resolveForwardContextUrl(refererHeader, sourceTargetUrl);
+    if (refererContext?.isProxied) {
+      headers.set("referer", refererContext.url.toString());
+    } else if (shouldForwardContextUrl(refererContext?.url, sourceTargetUrl)) {
+      headers.set("referer", retargetProxyUrl(refererContext.url, sourceTargetUrl, targetUrl).toString());
     } else {
       headers.delete("referer");
     }
@@ -404,6 +417,16 @@ function rewriteForwardHeaders(headers, targetUrl, originalTargetUrl, requestCon
   if (!headers.get("origin") && shouldSendOrigin(headers)) {
     headers.set("origin", targetUrl.origin);
   }
+}
+
+function resolveForwardContextUrl(value, sourceTargetUrl) {
+  const contextUrl = safeResolveUrl(value, sourceTargetUrl);
+  if (!contextUrl) {
+    return null;
+  }
+
+  const proxiedTarget = parseProxyTarget(contextUrl, null);
+  return proxiedTarget ? { url: proxiedTarget, isProxied: true } : { url: contextUrl, isProxied: false };
 }
 
 function retargetProxyUrl(candidateUrl, sourceTargetUrl, targetUrl) {
@@ -464,5 +487,105 @@ async function handleWebSocket(request, targetUrl) {
     headers,
     body: request.body,
   });
+  debugLogFetchInput("websocket", upstreamRequest);
   return fetch(upstreamRequest);
+}
+
+function debugLogFetchInput(label, input, init) {
+  if (!DEBUG_FETCH) {
+    return;
+  }
+
+  try {
+    const serialized = serializeFetchInput(input, init);
+    if (!matchesDebugFetchFilter(serialized.input?.url || serialized.input?.value)) {
+      return;
+    }
+    console.log(`[debug:fetch:${label}]`, JSON.stringify(serialized));
+  } catch (error) {
+    console.log(`[debug:fetch:${label}]`, "failed to serialize fetch input", error?.message || String(error));
+  }
+}
+
+function debugLogFetchResponse(label, response, targetUrl) {
+  if (!DEBUG_FETCH) {
+    return;
+  }
+
+  try {
+    if (!matchesDebugFetchFilter(targetUrl?.toString() || response.url)) {
+      return;
+    }
+    console.log(
+      `[debug:fetch-response:${label}]`,
+      JSON.stringify({
+        targetUrl: targetUrl?.toString(),
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers),
+        redirected: response.redirected,
+        url: response.url,
+      })
+    );
+  } catch (error) {
+    console.log(`[debug:fetch-response:${label}]`, "failed to serialize fetch response", error?.message || String(error));
+  }
+}
+
+function matchesDebugFetchFilter(value) {
+  if (!DEBUG_FETCH_HOST_FILTER) {
+    return true;
+  }
+
+  if (!value) {
+    return false;
+  }
+
+  try {
+    return new URL(value).hostname.endsWith(DEBUG_FETCH_HOST_FILTER);
+  } catch {
+    return String(value).includes(DEBUG_FETCH_HOST_FILTER);
+  }
+}
+
+function serializeFetchInput(input, init) {
+  const request = input instanceof Request ? input : null;
+  return {
+    input: request
+      ? serializeRequest(input)
+      : {
+          type: typeof input,
+          value: String(input),
+        },
+    init: init ? serializeRequestInit(init) : undefined,
+  };
+}
+
+function serializeRequest(request) {
+  return {
+    url: request.url,
+    method: request.method,
+    headers: Object.fromEntries(request.headers),
+    bodyUsed: request.bodyUsed,
+    hasBody: request.body !== null,
+    redirect: request.redirect,
+    mode: request.mode,
+    credentials: request.credentials,
+    cache: request.cache,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+    integrity: request.integrity,
+    keepalive: request.keepalive,
+  };
+}
+
+function serializeRequestInit(init) {
+  const serialized = { ...init };
+  if (init.headers) {
+    serialized.headers = init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers;
+  }
+  if (init.body) {
+    serialized.body = `[${typeof init.body}]`;
+  }
+  return serialized;
 }

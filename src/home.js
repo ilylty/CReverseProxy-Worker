@@ -4,6 +4,7 @@ const HOME_WALLPAPER_FALLBACK_URL =
   "https://lh3.googleusercontent.com/aida-public/AB6AXuAo29WTKrrnFgq85-0kTYKtx0OrXtSdgI0zIg6oihcNP5hBDQpZRNIxURPq5pY9V-LowO-__FcQShRFkqzuVB6Ca9rIgAK-XZlWUlqVPY2LgCmB2Hw0g_dhKZnUNl275Or25SF89NsqtgRnYGADTCJILh4SM9tvQMhbbPWa-XQnYF3YAxFR-8Jb8XBUoDizFvABD4gHIRD9LANhBx9cCGBiSWYTLNpMshSmpp5yNs4-KxZTJM8fmIEGX06R4v4P3I0ZKKzdE2VigKo";
 const HOME_WALLPAPER_API_URL =
   "https://binary-proxy-3.1415926.ddns-ip.net/?url=https%3A%2F%2Fapi%2Elimestart%2Ecn%2Fbackend%2Fbing-wallpaper-v3%3Flang%3Dzh-CN&_proxy_referer=https%3A%2F%2Fwww%2Elimestart%2Ecn%2F&_proxy_origin=https%3A%2F%2Fwww%2Elimestart%2Ecn&_proxy_User-Agent=Mozilla%2F5%2E0%20%28Windows%20NT%2010%2E0%3B%20Win64%3B%20x64%29%20AppleWebKit%2F537%2E36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F132%2E0%2E0%2E0%20Safari%2F537%2E36";
+const DEBUG_FETCH = false;
 
 export async function renderHome(proxyOrigin) {
   const wallpaper = await fetchHomeWallpaper();
@@ -267,11 +268,13 @@ async function fetchHomeWallpaper() {
   };
 
   try {
-    const response = await fetch(HOME_WALLPAPER_API_URL, {
+    const fetchInit = {
       headers: {
         accept: "application/json",
       },
-    });
+    };
+    debugLogFetchInput("home-wallpaper", HOME_WALLPAPER_API_URL, fetchInit);
+    const response = await fetch(HOME_WALLPAPER_API_URL, fetchInit);
 
     if (!response.ok) {
       return fallbackWallpaper;
@@ -291,6 +294,48 @@ async function fetchHomeWallpaper() {
   } catch {
     return fallbackWallpaper;
   }
+}
+
+function debugLogFetchInput(label, input, init) {
+  if (!DEBUG_FETCH) {
+    return;
+  }
+
+  try {
+    console.log(`[debug:fetch:${label}]`, JSON.stringify(serializeFetchInput(input, init)));
+  } catch (error) {
+    console.log(`[debug:fetch:${label}]`, "failed to serialize fetch input", error?.message || String(error));
+  }
+}
+
+function serializeFetchInput(input, init) {
+  const request = input instanceof Request ? input : null;
+  return {
+    input: request
+      ? {
+          url: request.url,
+          method: request.method,
+          headers: Object.fromEntries(request.headers),
+          bodyUsed: request.bodyUsed,
+          hasBody: request.body !== null,
+        }
+      : {
+          type: typeof input,
+          value: String(input),
+        },
+    init: init ? serializeRequestInit(init) : undefined,
+  };
+}
+
+function serializeRequestInit(init) {
+  const serialized = { ...init };
+  if (init.headers) {
+    serialized.headers = init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers;
+  }
+  if (init.body) {
+    serialized.body = `[${typeof init.body}]`;
+  }
+  return serialized;
 }
 
 function escapeHtml(value) {
